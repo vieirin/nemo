@@ -13,8 +13,11 @@ repository.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["web_sys_unstable_apis"]
+default = ["web_sys_unstable_apis", "language-server"]
 web_sys_unstable_apis = []
+# Exports Nemo's language server (`createNemoLanguageServer`).
+# Builds that only need the engine can leave it out with `--no-default-features`.
+language-server = ["dep:nemo-language-server", "dep:futures"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wasm_bindgen_unstable_test_coverage)'] }
@@ -26,8 +29,8 @@ indexmap = { workspace = true }
 js-sys = "0.3.63"
 nemo = { path = "../nemo", features = [ "js" ], default-features = false }
 nemo-physical = { path = "../nemo-physical", default-features = false }
-nemo-language-server = { path = "../nemo-language-server", features = [ "js" ], default-features = false}
-futures = { workspace = true }
+nemo-language-server = { path = "../nemo-language-server", features = [ "js" ], default-features = false, optional = true }
+futures = { workspace = true, optional = true }
 gloo-utils = { version = "0.3.0", features = ["serde"] }
 thiserror = { workspace = true }
 # NOTE: the version of wasm-bindgen must be available in nixpkgs-26.05, cf.  https://search.nixos.org/packages?query=wasm-bindgen-cli

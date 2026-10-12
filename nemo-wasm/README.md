@@ -15,6 +15,7 @@ wasm-pack build --out-dir nemoWASMBundler --target bundler --weak-refs --release
 wasm-pack build --out-dir nemoWASMWeb --target web --weak-refs --release
 ```
 
+- The language server (`createNemoLanguageServer`) is behind the default `language-server` feature. To build only the engine, which is smaller, pass `-- --no-default-features --features web_sys_unstable_apis` to `wasm-pack build`.
 - In order to use the `FileSystemSyncAccessHandle` APIs, the `web_sys_unstable_apis` `cfg` flag needs to be set
   - See https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html
   - See https://rustwasm.github.io/wasm-bindgen/api/web_sys/struct.FileSystemSyncAccessHandle.html

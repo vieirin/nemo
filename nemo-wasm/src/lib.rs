@@ -23,6 +23,7 @@ use nemo::{
 
 use nemo_physical::{error::ExternalReadingError, resource::Resource};
 
+#[cfg(feature = "language-server")]
 mod language_server;
 mod models;
 
