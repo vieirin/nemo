@@ -36,7 +36,7 @@ thiserror = { workspace = true }
 # NOTE: the version of wasm-bindgen must be available in nixpkgs-26.05, cf.  https://search.nixos.org/packages?query=wasm-bindgen-cli
 wasm-bindgen = "=0.2.126"
 wasm-bindgen-futures = "0.4.37"
-web-sys = { version = "0.3.64", features = [ "Blob", "FileReaderSync", "FileSystemSyncAccessHandle" ]}
+web-sys = { version = "0.3.64", features = [ "Blob", "FileSystemSyncAccessHandle" ]}
 serde = { workspace = true }
 serde_json = { workspace = true }
 
