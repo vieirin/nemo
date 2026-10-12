@@ -605,6 +605,7 @@ c(?x) :- a(?x, 1), ~d(?x).
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
     async fn add_facts_matches_text_facts() {
+        let _lock = crate::EXECUTION_TEST_LOCK.lock().await;
         let text =
             format!("{RULES}\na(\"s\", 1). a(t, 2.5). a(3, \"u\"). a(\"s\", 1). a(true, 1). d(3).");
         let mut from_text =
@@ -664,6 +665,7 @@ c(?x) :- a(?x, 1), ~d(?x).
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
     async fn add_facts_extends_program_facts() {
+        let _lock = crate::EXECUTION_TEST_LOCK.lock().await;
         let program = prepare(&format!("{RULES}\na(1, 1)."));
         let mut engine =
             DefaultExecutionEngine::from_handle(program, ExecutionParameters::default())
@@ -695,6 +697,7 @@ c(?x) :- a(?x, 1), ~d(?x).
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
     async fn add_facts_registers_unknown_predicates() {
+        let _lock = crate::EXECUTION_TEST_LOCK.lock().await;
         let mut engine =
             DefaultExecutionEngine::from_handle(prepare(RULES), ExecutionParameters::default())
                 .await
@@ -714,6 +717,7 @@ c(?x) :- a(?x, 1), ~d(?x).
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
     async fn add_facts_rejects_invalid_input() {
+        let _lock = crate::EXECUTION_TEST_LOCK.lock().await;
         let mut engine =
             DefaultExecutionEngine::from_handle(prepare(RULES), ExecutionParameters::default())
                 .await
