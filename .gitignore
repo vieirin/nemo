@@ -34,3 +34,7 @@ flycheck_*.el
 
 # ide settings
 /.vscode
+
+# nemo-wasm packages built by nemo-wasm/Dockerfile
+/nemo-wasm/pkg-node
+/nemo-wasm/pkg-web

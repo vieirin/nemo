@@ -1,0 +1,4 @@
+target
+**/target
+nemo-wasm/pkg-*
+.git

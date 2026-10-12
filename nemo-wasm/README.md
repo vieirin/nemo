@@ -20,62 +20,58 @@ wasm-pack build --out-dir nemoWASMWeb --target web --weak-refs --release
   - See https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html
   - See https://rustwasm.github.io/wasm-bindgen/api/web_sys/struct.FileSystemSyncAccessHandle.html
 
+### In Docker
+
+`Dockerfile` builds the packages with a dated nightly and a pinned `wasm-pack`, without a local Rust toolchain. From the repository root:
+
+```
+docker build -f nemo-wasm/Dockerfile --output type=local,dest=nemo-wasm .
+node nemo-wasm/tests/smoke.mjs
+```
+
+This writes `nemo-wasm/pkg-node` (`--target nodejs`) and `nemo-wasm/pkg-web` (`--target web`), without the language server (add `--build-arg FEATURES=language-server` to include it), and runs a smoke test against the Node.js package.
+
 ## Example usage
 
-### TypeScript
-
 ```typescript
-const program = new NemoProgram(programText);
-console.log(program.getEDBPredicates());
+import { NemoEngine, NemoProgram } from "nemo-wasm";
 
-const engine = new NemoEngine(program);
-engine.reason();
+// Parse, validate and transform the rules once.
+const program = new NemoProgram(`
+reach(?x, ?y) :- edge(?x, ?y).
+reach(?x, ?z) :- reach(?x, ?y), edge(?y, ?z).
+@output reach.
+`);
 
-for (const predicate of program.getOutputPredicates()) {
-  const rows = new NemoResultsIterable(engine.getResult(predicate));
+// Engines created from the program don't parse the rules again.
+// `using` frees the engine at the end of the block (or call `engine.free()`).
+{
+  using engine = await program.createEngine();
 
-  for (const row of rows) {
-    console.log(row);
+  // Facts as data: strings are plain strings ("a" in Nemo), safe integers and
+  // bigints are integers, other numbers are doubles, `{ iri: "a" }` is the constant a.
+  engine.addFacts("edge", [["a", "b"], ["b", "c"]]);
+  await engine.reason();
+  console.log(await engine.getResultRows("reach"));
+
+  // Replace a predicate's facts and reason again: this starts over
+  // from the prepared program, without parsing anything.
+  engine.setFacts("edge", [["c", "d"]]);
+  await engine.reason();
+
+  for (const row of await engine.getResult("reach")) {
+    console.log(row.values, row.id);
   }
 }
 
-// See https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Iterators_and_Generators
-// Iterables are not directly supported yet, see https://github.com/rustwasm/wasm-bindgen/issues/1478
-class NemoResultsIterable {
-  public constructor(private iterator: NemoResults) {}
-
-  public [Symbol.iterator]() {
-    return this.iterator;
-  }
-}
+// Programs with facts and imports can also be given as text. Resources for
+// imports may be Blobs, Uint8Arrays, ArrayBuffers or strings.
+const engine = await NemoEngine.new(
+  `@import edge :- csv{resource="edges.csv"}. @output edge.`,
+  { "edges.csv": "a,b\n" },
+);
+await engine.reason();
+engine.free();
 ```
 
-### JavaScript
-
-```typescript
-const program = new NemoProgram(programText);
-console.log(program.getEDBPredicates());
-
-const engine = new NemoEngine(program);
-engine.reason();
-
-for (const predicate of program.getOutputPredicates()) {
-  const rows = new NemoResultsIterable(engine.getResult(predicate));
-
-  for (const row of rows) {
-    console.log(row);
-  }
-}
-
-// See https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Iterators_and_Generators
-// Iterables are not directly supported yet, see https://github.com/rustwasm/wasm-bindgen/issues/1478
-class NemoResultsIterable {
-  constructor(iterator) {
-    this.iterator = iterator;
-  }
-
-  [Symbol.iterator]() {
-    return this.iterator;
-  }
-}
-```
+Engines, programs and results hold WebAssembly memory. Free them with `free()` or `using` when they are no longer needed: the garbage collector does not notice how much memory they hold, and creating many engines without freeing them can exhaust the WebAssembly memory.
