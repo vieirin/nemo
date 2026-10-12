@@ -193,6 +193,7 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
         &mut self,
         facts: Vec<Fact>,
     ) -> Result<(ExecutionTrace, Vec<TraceFactHandle>), Error> {
+        self.started = true;
         for fact in &facts {
             if fact.validate().is_err() {
                 return Err(TracingError::InvalidFact {
@@ -218,6 +219,7 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
         &mut self,
         predicates: impl IntoIterator<Item = &Tag>,
     ) -> Result<(ExecutionTrace, Vec<TraceFactHandle>), Error> {
+        self.started = true;
         let mut trace = ExecutionTrace::new(self.program_handle.clone());
         let mut handles = Vec::new();
 

@@ -86,7 +86,7 @@ pub struct ExecutionEngine<RuleSelectionStrategy> {
 
     /// Predicates for which facts were added with [Self::add_facts]
     added_fact_predicates: HashSet<Tag>,
-    /// Whether the engine has been executed or queried,
+    /// Whether the engine has been executed, queried or traced,
     /// after which no more facts can be added
     started: bool,
 }
@@ -241,7 +241,8 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
     ///
     /// # Errors
     /// Returns [Error::FactsAfterExecution] if the engine has already been
-    /// executed or queried with [Self::predicate_rows] or [Self::predicate_rows_ids],
+    /// executed, queried with [Self::predicate_rows] or [Self::predicate_rows_ids],
+    /// or traced, since those may already have loaded the input facts,
     /// and [Error::FactArity] if a row does not match the predicate's arity.
     pub fn add_facts<Rows>(&mut self, predicate: Tag, rows: Rows) -> Result<(), Error>
     where

@@ -685,6 +685,7 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
         &mut self,
         query: &TableEntriesForTreeNodesQuery,
     ) -> Result<TableEntriesForTreeNodesResponse, Error> {
+        self.started = true;
         let program = self.program.clone();
 
         let response = self.trace_node_prepare(query).await?;

@@ -441,6 +441,7 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
         &mut self,
         query: TreeForTableQuery,
     ) -> Result<TreeForTableResponse, Error> {
+        self.started = true;
         let mut facts = Vec::new();
 
         for fact_query in query.queries {
