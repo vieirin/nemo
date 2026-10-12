@@ -9,7 +9,7 @@ use nemo_physical::{
         database::{
             DatabaseInstance, Dict,
             id::{ExecutionId, PermanentTableId},
-            sources::TableSource,
+            sources::{SimpleTable, TableSource},
         },
         execution_plan::{ColumnOrder, ExecutionNodeRef, ExecutionPlan},
     },
@@ -24,6 +24,9 @@ use std::{
     hash::Hash,
     ops::Range,
 };
+
+/// Step under which the input facts of a predicate are stored.
+const EDB_STEP: usize = 0;
 
 /// Indicates that the table contains the union of successive tables.
 /// For example assume that for predicate p there were tables derived in steps 2, 4, 7, 10, 11.
@@ -506,7 +509,6 @@ impl TableManager {
         };
 
         let edb_order = ColumnOrder::default();
-        const EDB_STEP: usize = 0;
 
         let name = self.generate_table_name(&predicate, &edb_order, EDB_STEP);
 
@@ -514,6 +516,28 @@ impl TableManager {
         self.database.add_sources(table_id, edb_order, sources);
 
         self.add_subtable(SubtableIdentifier::new(predicate, EDB_STEP), table_id)
+    }
+
+    /// Add a table of input facts for some predicate,
+    /// in addition to the sources added with [Self::add_edb].
+    ///
+    /// Predicate must be registered before calling this function,
+    /// and its input facts must not have been loaded yet.
+    pub(crate) fn add_edb_table(&mut self, predicate: Tag, table: SimpleTable) {
+        let edb_table = self
+            .predicate_subtables
+            .get(&predicate)
+            .and_then(|handler| handler.single.first())
+            .filter(|(step, _)| *step == EDB_STEP)
+            .map(|(_, id)| *id);
+
+        match edb_table {
+            Some(table_id) => {
+                self.database
+                    .add_source_table(table_id, ColumnOrder::default(), table)
+            }
+            None => self.add_edb(predicate, vec![Box::new(table)]),
+        }
     }
 
     /// Add a [Trie] as a subtable of a predicate.
@@ -564,6 +588,12 @@ impl TableManager {
             .get(predicate)
             .expect("Predicate should be registered before calling this function")
             .arity
+    }
+
+    /// Return the arity of a given predicate,
+    /// or `None` if the predicate has not been registered.
+    pub(crate) fn predicate_arity(&self, predicate: &Tag) -> Option<usize> {
+        self.predicate_to_info.get(predicate).map(|info| info.arity)
     }
 
     /// For a predicate,

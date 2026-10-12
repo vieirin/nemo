@@ -83,6 +83,12 @@ pub struct ExecutionEngine<RuleSelectionStrategy> {
     step_times_ms: Vec<u128>,
     /// Current step
     current_step: usize,
+
+    /// Predicates for which facts were added with [Self::add_facts]
+    added_fact_predicates: HashSet<Tag>,
+    /// Whether the engine has been executed or queried,
+    /// after which no more facts can be added
+    started: bool,
 }
 
 impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
@@ -156,6 +162,8 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
             rule_history: vec![usize::MAX], // Placeholder, Step counting starts at 1
             step_times_ms: vec![0],         // Placeholder, Step counting starts at 1
             current_step: 1,
+            added_fact_predicates: HashSet::new(),
+            started: false,
         })
     }
 
@@ -215,6 +223,61 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
         for (predicate, sources) in predicate_to_sources {
             table_manager.add_edb(predicate.clone(), sources);
         }
+
+        Ok(())
+    }
+
+    /// Add input facts for a predicate, given as rows of [AnyDataValue]s,
+    /// in addition to the facts and imports of the program.
+    ///
+    /// This avoids parsing facts as program text, which makes it the cheap way
+    /// to load many facts produced by another program. Together with
+    /// [Self::from_handle], it allows running a prepared program on different
+    /// sets of facts. Rows are treated like facts of the program: duplicates
+    /// are removed when the table is loaded.
+    ///
+    /// Predicates that do not appear in the program are registered with the
+    /// arity of their rows, so that their facts can still be queried.
+    ///
+    /// # Errors
+    /// Returns [Error::FactsAfterExecution] if the engine has already been
+    /// executed or queried with [Self::predicate_rows] or [Self::predicate_rows_ids],
+    /// and [Error::FactArity] if a row does not match the predicate's arity.
+    pub fn add_facts<Rows>(&mut self, predicate: Tag, rows: Rows) -> Result<(), Error>
+    where
+        Rows: IntoIterator<Item = Vec<AnyDataValue>>,
+    {
+        if self.started {
+            return Err(Error::FactsAfterExecution);
+        }
+
+        let mut rows = rows.into_iter().peekable();
+        let Some(first) = rows.peek() else {
+            return Ok(());
+        };
+
+        let known_arity = self.table_manager.predicate_arity(&predicate);
+        let arity = known_arity.unwrap_or(first.len());
+
+        let mut table = SimpleTable::new(arity);
+        for row in rows {
+            if row.len() != arity {
+                return Err(Error::FactArity {
+                    predicate: predicate.to_string(),
+                    expected: arity,
+                    found: row.len(),
+                });
+            }
+
+            table.add_row(row);
+        }
+
+        if known_arity.is_none() {
+            self.table_manager
+                .register_predicate(predicate.clone(), arity);
+        }
+        self.table_manager.add_edb_table(predicate.clone(), table);
+        self.added_fact_predicates.insert(predicate);
 
         Ok(())
     }
@@ -293,6 +356,8 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
 
     /// Executes the program.
     pub async fn execute(&mut self) -> Result<(), Error> {
+        self.started = true;
+
         TimedCode::instance().sub("Reasoning/Rules").start();
         TimedCode::instance().sub("Reasoning/Execution").start();
 
@@ -301,6 +366,7 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
             .facts()
             .iter()
             .map(|atom| atom.predicate())
+            .chain(self.added_fact_predicates.iter().cloned())
             .collect::<HashSet<_>>();
 
         let execution_strategy = self
@@ -368,6 +434,8 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
         &mut self,
         predicate: &Tag,
     ) -> Result<Option<impl Iterator<Item = Vec<AnyDataValue>> + '_>, Error> {
+        self.started = true;
+
         let Some(table_id) = self.table_manager.combine_predicate(predicate).await? else {
             return Ok(None);
         };
@@ -380,6 +448,8 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
         &mut self,
         predicate: &Tag,
     ) -> Result<Option<impl Iterator<Item = (Vec<AnyDataValue>, usize)>>, Error> {
+        self.started = true;
+
         let Some(table_id) = self.table_manager.combine_predicate(predicate).await? else {
             return Ok(None);
         };
@@ -403,7 +473,9 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
     /// Returns the arity of the predicate if the predicate is known to the engine,
     /// and `None` otherwise.
     pub fn predicate_arity(&self, predicate: &Tag) -> Option<usize> {
-        self.program.predicate_arity(predicate)
+        self.program
+            .predicate_arity(predicate)
+            .or_else(|| self.table_manager.predicate_arity(predicate))
     }
 
     /// Return a list of all all export predicates and their respective [`Export`]s,
@@ -467,11 +539,14 @@ mod test {
     use test_log;
     use tokio;
 
+    use nemo_physical::datavalues::AnyDataValue;
+
     use crate::{
+        error::Error,
         execution::{DefaultExecutionEngine, execution_parameters::ExecutionParameters},
         rule_file::RuleFile,
         rule_model::{
-            pipeline::transformations::default::TransformationDefault,
+            components::tag::Tag, pipeline::transformations::default::TransformationDefault,
             programs::handle::ProgramHandle,
         },
     };
@@ -500,6 +575,172 @@ b(?x) :- a(?x).";
             .expect("rule originates from the source");
         assert_eq!(position.line, 2);
         assert_eq!(position.column, 1);
+    }
+
+    fn prepare(source: &str) -> ProgramHandle {
+        let file = RuleFile::new(source.to_string(), "test".to_string());
+        ProgramHandle::from_file(&file)
+            .expect("program parses")
+            .into_object()
+            .transform(TransformationDefault::new(&ExecutionParameters::default()))
+            .expect("program is valid")
+    }
+
+    async fn sorted_rows(engine: &mut DefaultExecutionEngine, predicate: &str) -> Vec<String> {
+        let mut rows = engine
+            .predicate_rows(&Tag::from(predicate))
+            .await
+            .unwrap()
+            .map(|rows| rows.map(|row| format!("{row:?}")).collect::<Vec<_>>())
+            .unwrap_or_default();
+        rows.sort();
+        rows
+    }
+
+    const RULES: &str = "b(?x, ?y) :- a(?x, ?y).
+c(?x) :- a(?x, 1), ~d(?x).
+@output b.
+@output c.";
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn add_facts_matches_text_facts() {
+        let text =
+            format!("{RULES}\na(\"s\", 1). a(t, 2.5). a(3, \"u\"). a(\"s\", 1). a(true, 1). d(3).");
+        let mut from_text =
+            DefaultExecutionEngine::from_handle(prepare(&text), ExecutionParameters::default())
+                .await
+                .unwrap();
+        from_text.execute().await.unwrap();
+
+        let mut from_rows =
+            DefaultExecutionEngine::from_handle(prepare(RULES), ExecutionParameters::default())
+                .await
+                .unwrap();
+        from_rows
+            .add_facts(
+                Tag::from("a"),
+                vec![
+                    vec![
+                        AnyDataValue::new_plain_string("s".to_string()),
+                        AnyDataValue::new_integer_from_i64(1),
+                    ],
+                    vec![
+                        AnyDataValue::new_iri("t".to_string()),
+                        AnyDataValue::new_double_from_f64(2.5).unwrap(),
+                    ],
+                    vec![
+                        AnyDataValue::new_integer_from_i64(3),
+                        AnyDataValue::new_plain_string("u".to_string()),
+                    ],
+                    vec![
+                        AnyDataValue::new_plain_string("s".to_string()),
+                        AnyDataValue::new_integer_from_i64(1),
+                    ],
+                    vec![
+                        AnyDataValue::new_boolean(true),
+                        AnyDataValue::new_integer_from_i64(1),
+                    ],
+                ],
+            )
+            .unwrap();
+        from_rows
+            .add_facts(
+                Tag::from("d"),
+                vec![vec![AnyDataValue::new_integer_from_i64(3)]],
+            )
+            .unwrap();
+        from_rows.execute().await.unwrap();
+
+        for predicate in ["a", "b", "c", "d"] {
+            let expected = sorted_rows(&mut from_text, predicate).await;
+            assert!(!expected.is_empty());
+            assert_eq!(sorted_rows(&mut from_rows, predicate).await, expected);
+        }
+        assert_eq!(sorted_rows(&mut from_rows, "b").await.len(), 4);
+        assert_eq!(sorted_rows(&mut from_rows, "c").await.len(), 2);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn add_facts_extends_program_facts() {
+        let program = prepare(&format!("{RULES}\na(1, 1)."));
+        let mut engine =
+            DefaultExecutionEngine::from_handle(program, ExecutionParameters::default())
+                .await
+                .unwrap();
+        engine
+            .add_facts(
+                Tag::from("a"),
+                vec![vec![
+                    AnyDataValue::new_integer_from_i64(2),
+                    AnyDataValue::new_integer_from_i64(1),
+                ]],
+            )
+            .unwrap();
+        engine
+            .add_facts(
+                Tag::from("a"),
+                vec![vec![
+                    AnyDataValue::new_integer_from_i64(3),
+                    AnyDataValue::new_integer_from_i64(1),
+                ]],
+            )
+            .unwrap();
+        engine.execute().await.unwrap();
+
+        assert_eq!(sorted_rows(&mut engine, "c").await.len(), 3);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn add_facts_registers_unknown_predicates() {
+        let mut engine =
+            DefaultExecutionEngine::from_handle(prepare(RULES), ExecutionParameters::default())
+                .await
+                .unwrap();
+        engine
+            .add_facts(
+                Tag::from("unused"),
+                vec![vec![AnyDataValue::new_integer_from_i64(1)]],
+            )
+            .unwrap();
+        engine.execute().await.unwrap();
+
+        assert_eq!(engine.predicate_arity(&Tag::from("unused")), Some(1));
+        assert_eq!(sorted_rows(&mut engine, "unused").await.len(), 1);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn add_facts_rejects_invalid_input() {
+        let mut engine =
+            DefaultExecutionEngine::from_handle(prepare(RULES), ExecutionParameters::default())
+                .await
+                .unwrap();
+
+        let wrong_arity = engine.add_facts(
+            Tag::from("a"),
+            vec![vec![AnyDataValue::new_integer_from_i64(1)]],
+        );
+        assert_matches!(
+            wrong_arity,
+            Err(Error::FactArity {
+                expected: 2,
+                found: 1,
+                ..
+            })
+        );
+
+        engine.execute().await.unwrap();
+        let after_execution = engine.add_facts(
+            Tag::from("a"),
+            vec![vec![
+                AnyDataValue::new_integer_from_i64(1),
+                AnyDataValue::new_integer_from_i64(1),
+            ]],
+        );
+        assert_matches!(after_execution, Err(Error::FactsAfterExecution));
     }
 
     #[tokio::test]

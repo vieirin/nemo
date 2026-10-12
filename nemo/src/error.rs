@@ -66,6 +66,21 @@ pub enum Error {
     /// Error related to the creation of data values
     #[error(transparent)]
     DataValueCreationError(#[from] DataValueCreationError),
+    /// Facts were added to an engine that has already been executed or queried
+    #[error("facts can only be added before the engine is executed or queried")]
+    FactsAfterExecution,
+    /// A fact does not have as many terms as its predicate's arity
+    #[error(
+        "fact for predicate `{predicate}` has {found} terms, but the predicate has arity {expected}"
+    )]
+    FactArity {
+        /// Predicate of the fact
+        predicate: String,
+        /// Arity of the predicate
+        expected: usize,
+        /// Number of terms of the fact
+        found: usize,
+    },
 }
 
 impl From<ReadingError> for Error {
