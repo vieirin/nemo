@@ -13,15 +13,12 @@ use web_sys::Blob;
 use nemo::{
     datavalues::{AnyDataValue, DataValue},
     error::report::ProgramReport,
-    execution::{
-        DefaultExecutionEngine, ExecutionEngine, execution_parameters::ExecutionParameters,
-    },
+    execution::{DefaultExecutionEngine, DefaultPreparedPlan, ExecutionEngine},
     io::{
         ImportManager,
         resource_providers::{ResourceProvider, ResourceProviders, http},
     },
-    rule_file::RuleFile,
-    rule_model::{components::tag::Tag, programs::handle::ProgramHandle},
+    rule_model::components::tag::Tag,
 };
 
 use nemo_physical::resource::Resource;
@@ -191,23 +188,27 @@ impl ResourceProvider for BlobResourceProvider {
 /// A program that has been parsed, validated and transformed once,
 /// from which any number of engines can be created with `createEngine`.
 ///
-/// Creating engines from a prepared program avoids parsing the rules again
-/// for each engine. Combined with `NemoEngine.addFacts`, this runs the same
-/// rules on different facts without parsing anything.
+/// Creating engines from a prepared program avoids parsing and planning the
+/// rules again for each engine. Combined with `NemoEngine.addFacts`, this runs
+/// the same rules on different facts without parsing anything.
 #[wasm_bindgen]
 pub struct NemoProgram {
-    program: ProgramHandle,
+    plan: Rc<DefaultPreparedPlan>,
 }
 
 #[wasm_bindgen]
 impl NemoProgram {
-    /// Parse, validate and transform the program given as text.
+    /// Parse, validate and transform the program given as text,
+    /// and plan the evaluation of its rules.
     #[wasm_bindgen(constructor)]
     pub fn new(input: &str) -> Result<NemoProgram, NemoError> {
         let program =
             nemo::api::load_program_handle(input.to_string(), "NemoWasmFile".to_string())?;
+        let plan = DefaultPreparedPlan::new(program)?;
 
-        Ok(NemoProgram { program })
+        Ok(NemoProgram {
+            plan: Rc::new(plan),
+        })
     }
 
     /// Create an engine for this program.
@@ -223,7 +224,7 @@ impl NemoProgram {
             .await?
             .into_providers();
 
-        NemoEngine::from_program(self.program.clone(), providers).await
+        NemoEngine::from_plan(self.plan.clone(), providers).await
     }
 }
 
@@ -262,8 +263,8 @@ export type NemoValue = string | number | bigint | boolean;
 #[wasm_bindgen]
 pub struct NemoEngine {
     engine: DefaultExecutionEngine,
-    /// The prepared program, to create the engine again when facts are replaced
-    program: ProgramHandle,
+    /// The plan of the program, to create the engine again when facts are replaced
+    plan: Rc<DefaultPreparedPlan>,
     /// Resources for imports, to create the engine again
     resource_providers: ResourceProviders,
     /// Facts added with `addFacts` or `setFacts`, by predicate
@@ -325,36 +326,18 @@ impl NemoEngine {
         input: &str,
         resources: Option<NemoResources>,
     ) -> Result<NemoEngine, NemoError> {
-        let resource_providers = BlobResourceProvider::from_js(resources.as_deref())
-            .await?
-            .into_providers();
-
-        let rule_file = RuleFile::new(input.to_string(), "NemoWasmFile".to_string());
-        let mut execution_parameters = ExecutionParameters::default();
-        execution_parameters.set_import_manager(ImportManager::new(resource_providers.clone()));
-
-        let (engine, _warnings) = ExecutionEngine::from_file(rule_file, execution_parameters)
-            .await?
-            .into_pair();
-
-        Ok(NemoEngine {
-            program: engine.current_program_handle(),
-            engine,
-            resource_providers,
-            facts: IndexMap::new(),
-            stale: false,
-        })
+        NemoProgram::new(input)?.create_engine(resources).await
     }
 
-    async fn from_program(
-        program: ProgramHandle,
+    async fn from_plan(
+        plan: Rc<DefaultPreparedPlan>,
         resource_providers: ResourceProviders,
     ) -> Result<NemoEngine, NemoError> {
-        let engine = Self::create_engine(&program, &resource_providers).await?;
+        let engine = Self::create_engine(&plan, &resource_providers).await?;
 
         Ok(NemoEngine {
             engine,
-            program,
+            plan,
             resource_providers,
             facts: IndexMap::new(),
             stale: false,
@@ -362,13 +345,12 @@ impl NemoEngine {
     }
 
     async fn create_engine(
-        program: &ProgramHandle,
+        plan: &DefaultPreparedPlan,
         resource_providers: &ResourceProviders,
     ) -> Result<DefaultExecutionEngine, NemoError> {
-        let mut execution_parameters = ExecutionParameters::default();
-        execution_parameters.set_import_manager(ImportManager::new(resource_providers.clone()));
+        let import_manager = ImportManager::new(resource_providers.clone());
 
-        Ok(ExecutionEngine::from_handle(program.clone(), execution_parameters).await?)
+        Ok(ExecutionEngine::from_plan(plan, import_manager).await?)
     }
 
     /// Create the engine again if facts have changed since it was used.
@@ -377,7 +359,7 @@ impl NemoEngine {
             return Ok(());
         }
 
-        let mut engine = Self::create_engine(&self.program, &self.resource_providers).await?;
+        let mut engine = Self::create_engine(&self.plan, &self.resource_providers).await?;
         for (predicate, rows) in &self.facts {
             engine.add_facts(predicate.clone(), rows.iter().cloned())?;
         }

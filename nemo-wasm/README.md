@@ -36,7 +36,7 @@ This writes `nemo-wasm/pkg-node` (`--target nodejs`) and `nemo-wasm/pkg-web` (`-
 ```typescript
 import { NemoEngine, NemoProgram } from "nemo-wasm";
 
-// Parse, validate and transform the rules once.
+// Parse, validate, transform and plan the rules once.
 const program = new NemoProgram(`
 reach(?x, ?y) :- edge(?x, ?y).
 reach(?x, ?z) :- reach(?x, ?y), edge(?y, ?z).

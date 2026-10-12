@@ -1,6 +1,9 @@
 //! Functionality which handles the execution of a program
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 use nemo_physical::{
     datavalues::AnyDataValue,
@@ -49,6 +52,51 @@ impl RuleInfo {
     }
 }
 
+/// The part of an [ExecutionEngine] that only depends on the rules of a program:
+/// the normalized program, the translation of rule ids used for tracing,
+/// and the rule selection strategy before any rule was applied.
+///
+/// Computing this is the bulk of creating an engine for a program with few facts.
+/// A plan is computed once with [PreparedPlan::new] and then used to create
+/// any number of engines with [ExecutionEngine::from_plan], each with its own
+/// tables and facts. The normalized program and the rule translation are shared
+/// between those engines, and each engine gets its own copy of the strategy,
+/// so it starts from the first rule.
+#[derive(Debug, Clone)]
+pub struct PreparedPlan<RuleSelectionStrategy> {
+    /// Handle to the logical program
+    program_handle: ProgramHandle,
+    /// Normalized program
+    program: Rc<NormalizedProgram>,
+    /// Translation of rule ids between the normalized and the original program
+    rule_translation: Rc<RuleIdTranslation>,
+    /// The selection strategy for rules, in its initial state
+    selection_strategy: RuleSelectionStrategy,
+}
+
+impl<Strategy: RuleSelectionStrategy> PreparedPlan<Strategy> {
+    /// Compute the plan for an already prepared [ProgramHandle]
+    /// (for example one obtained from [crate::api::load_program_handle]).
+    ///
+    /// Like [ExecutionEngine::from_handle], this performs **no** transformation.
+    ///
+    /// # Errors
+    /// Returns an error if the selection strategy cannot be built for the rules,
+    /// for example if they cannot be stratified.
+    pub fn new(program_handle: ProgramHandle) -> Result<Self, Error> {
+        let program = NormalizedProgram::normalize_program(&program_handle);
+        let rule_translation = RuleIdTranslation::new(&program_handle, &program);
+        let selection_strategy = Strategy::new(program.rules().iter().collect())?;
+
+        Ok(Self {
+            program_handle,
+            program: Rc::new(program),
+            rule_translation: Rc::new(rule_translation),
+            selection_strategy,
+        })
+    }
+}
+
 /// Object which handles the evaluation of the program.
 #[derive(Debug)]
 pub struct ExecutionEngine<RuleSelectionStrategy> {
@@ -56,11 +104,11 @@ pub struct ExecutionEngine<RuleSelectionStrategy> {
     program_handle: ProgramHandle,
 
     /// Normalized program
-    program: NormalizedProgram,
+    program: Rc<NormalizedProgram>,
 
     /// Translation of rule ids between the normalized and the original program,
     /// used for tracing
-    rule_translation: RuleIdTranslation,
+    rule_translation: Rc<RuleIdTranslation>,
 
     /// The picked selection strategy for rules
     selection_strategy: RuleSelectionStrategy,
@@ -128,30 +176,52 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
         Self::initialize(program, parameters.import_manager).await
     }
 
+    /// Initialize the [ExecutionEngine] from a [PreparedPlan].
+    ///
+    /// The plan is shared with the new engine instead of being computed again,
+    /// so this only builds the tables: it registers the predicates, adds the
+    /// constants of the program and its imports. Use this together with
+    /// [Self::add_facts] to evaluate the same program on many sets of facts.
+    pub async fn from_plan(
+        plan: &PreparedPlan<Strategy>,
+        import_manager: ImportManager,
+    ) -> Result<Self, Error>
+    where
+        Strategy: Clone,
+    {
+        Self::from_prepared(plan.clone(), import_manager).await
+    }
+
     /// Initialize the [ExecutionEngine].
     pub async fn initialize(
         program_handle: ProgramHandle,
         import_manager: ImportManager,
     ) -> Result<Self, Error> {
-        let normalized_program = NormalizedProgram::normalize_program(&program_handle);
-        let rule_translation = RuleIdTranslation::new(&program_handle, &normalized_program);
+        Self::from_prepared(PreparedPlan::new(program_handle)?, import_manager).await
+    }
+
+    /// Build the tables of a new [ExecutionEngine] for the given plan.
+    async fn from_prepared(
+        plan: PreparedPlan<Strategy>,
+        import_manager: ImportManager,
+    ) -> Result<Self, Error> {
+        let PreparedPlan {
+            program_handle,
+            program,
+            rule_translation,
+            selection_strategy,
+        } = plan;
 
         let mut table_manager = TableManager::new();
-        Self::register_all_predicates(&mut table_manager, &normalized_program);
-        Self::add_all_constants(&mut table_manager, &normalized_program);
-        Self::add_imports(&mut table_manager, &import_manager, &normalized_program).await?;
+        Self::register_all_predicates(&mut table_manager, &program);
+        Self::add_all_constants(&mut table_manager, &program);
+        Self::add_imports(&mut table_manager, &import_manager, &program).await?;
 
-        let mut rule_infos = Vec::<RuleInfo>::new();
-        normalized_program
-            .rules()
-            .iter()
-            .for_each(|_| rule_infos.push(RuleInfo::new()));
-
-        let selection_strategy = Strategy::new(normalized_program.rules().iter().collect())?;
+        let rule_infos = vec![RuleInfo::new(); program.rules().len()];
 
         Ok(Self {
             program_handle,
-            program: normalized_program,
+            program,
             rule_translation,
             selection_strategy,
             table_manager,
@@ -544,7 +614,9 @@ mod test {
 
     use crate::{
         error::Error,
-        execution::{DefaultExecutionEngine, execution_parameters::ExecutionParameters},
+        execution::{
+            DefaultExecutionEngine, DefaultPreparedPlan, execution_parameters::ExecutionParameters,
+        },
         rule_file::RuleFile,
         rule_model::{
             components::tag::Tag, pipeline::transformations::default::TransformationDefault,
@@ -746,6 +818,97 @@ c(?x) :- a(?x, 1), ~d(?x).
             ]],
         );
         assert_matches!(after_execution, Err(Error::FactsAfterExecution));
+    }
+
+    const STRATIFIED_RULES: &str = "reach(?x, ?y) :- edge(?x, ?y).
+reach(?x, ?z) :- reach(?x, ?y), edge(?y, ?z).
+node(?x) :- edge(?x, ?y).
+node(?y) :- edge(?x, ?y).
+unreached(?x, ?y) :- node(?x), node(?y), ~reach(?x, ?y).
+acyclic(?x) :- node(?x), ~reach(?x, ?x).
+reachable(?x, #count(?y)) :- reach(?x, ?y).
+edge(1, 2).
+@output reach.
+@output unreached.
+@output acyclic.
+@output reachable.";
+
+    fn edges(pairs: &[(i64, i64)]) -> Vec<Vec<AnyDataValue>> {
+        pairs
+            .iter()
+            .map(|&(x, y)| {
+                vec![
+                    AnyDataValue::new_integer_from_i64(x),
+                    AnyDataValue::new_integer_from_i64(y),
+                ]
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn engines_from_plan_match_engines_from_scratch() {
+        let _lock = crate::EXECUTION_TEST_LOCK.lock().await;
+        let fact_sets: [&[(i64, i64)]; 4] = [
+            &[],
+            &[(2, 3)],
+            &[(2, 3), (3, 1), (4, 5)],
+            &[(5, 6), (6, 5), (6, 7)],
+        ];
+        let predicates = ["edge", "node", "reach", "unreached", "acyclic", "reachable"];
+
+        let plan = DefaultPreparedPlan::new(prepare(STRATIFIED_RULES)).unwrap();
+
+        // Create all engines from the plan before executing any of them,
+        // so that they would observe any state shared through the plan.
+        let mut from_plan = Vec::new();
+        for facts in fact_sets {
+            let mut engine = DefaultExecutionEngine::from_plan(
+                &plan,
+                ExecutionParameters::default().import_manager,
+            )
+            .await
+            .unwrap();
+            engine.add_facts(Tag::from("edge"), edges(facts)).unwrap();
+            from_plan.push(engine);
+        }
+
+        for (facts, engine) in fact_sets.into_iter().zip(&mut from_plan) {
+            let mut from_scratch = DefaultExecutionEngine::from_handle(
+                prepare(STRATIFIED_RULES),
+                ExecutionParameters::default(),
+            )
+            .await
+            .unwrap();
+            from_scratch
+                .add_facts(Tag::from("edge"), edges(facts))
+                .unwrap();
+            from_scratch.execute().await.unwrap();
+            engine.execute().await.unwrap();
+
+            for predicate in predicates {
+                let expected = sorted_rows(&mut from_scratch, predicate).await;
+                assert!(!expected.is_empty());
+                assert_eq!(sorted_rows(engine, predicate).await, expected);
+            }
+        }
+
+        // An engine created after others from the same plan were executed
+        // starts from the first rule as well.
+        let mut late =
+            DefaultExecutionEngine::from_plan(&plan, ExecutionParameters::default().import_manager)
+                .await
+                .unwrap();
+        late.add_facts(Tag::from("edge"), edges(fact_sets[2]))
+            .unwrap();
+        late.execute().await.unwrap();
+        for predicate in predicates {
+            assert_eq!(
+                sorted_rows(&mut late, predicate).await,
+                sorted_rows(&mut from_plan[2], predicate).await
+            );
+        }
+        assert_eq!(sorted_rows(&mut late, "acyclic").await.len(), 2);
     }
 
     #[tokio::test]
