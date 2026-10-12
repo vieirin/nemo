@@ -31,6 +31,21 @@ node nemo-wasm/tests/smoke.mjs
 
 This writes `nemo-wasm/pkg-node` (`--target nodejs`) and `nemo-wasm/pkg-web` (`--target web`), without the language server (add `--build-arg FEATURES=language-server` to include it), and runs a smoke test against the Node.js package.
 
+### Releases
+
+Packages built this way are attached to the fork's GitHub releases, so they can be installed by URL without building anything:
+
+```
+node nemo-wasm/pack.mjs pkg-node 0.10.1-fork.1 dist   # writes dist/nemo-wasm-node-0.10.1-fork.1.tgz
+node nemo-wasm/pack.mjs pkg-web 0.10.1-fork.1 dist    # writes dist/nemo-wasm-web-0.10.1-fork.1.tgz
+```
+
+The packages keep the name `nemo-wasm`. Depend on a release asset by its URL, for example:
+
+```json
+"nemo-wasm": "https://github.com/vieirin/nemo/releases/download/nemo-wasm-v0.10.1-fork.1/nemo-wasm-node-0.10.1-fork.1.tgz"
+```
+
 ## Example usage
 
 ```typescript
