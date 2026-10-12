@@ -207,21 +207,25 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
     ) -> Result<Self, Error> {
         let PreparedPlan {
             program_handle,
-            program,
+            program: normalized_program,
             rule_translation,
             selection_strategy,
         } = plan;
 
         let mut table_manager = TableManager::new();
-        Self::register_all_predicates(&mut table_manager, &program);
-        Self::add_all_constants(&mut table_manager, &program);
-        Self::add_imports(&mut table_manager, &import_manager, &program).await?;
+        Self::register_all_predicates(&mut table_manager, &normalized_program);
+        Self::add_all_constants(&mut table_manager, &normalized_program);
+        Self::add_imports(&mut table_manager, &import_manager, &normalized_program).await?;
 
-        let rule_infos = vec![RuleInfo::new(); program.rules().len()];
+        let mut rule_infos = Vec::<RuleInfo>::new();
+        normalized_program
+            .rules()
+            .iter()
+            .for_each(|_| rule_infos.push(RuleInfo::new()));
 
         Ok(Self {
             program_handle,
-            program,
+            program: normalized_program,
             rule_translation,
             selection_strategy,
             table_manager,

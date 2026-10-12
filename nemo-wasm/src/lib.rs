@@ -326,7 +326,13 @@ impl NemoEngine {
         input: &str,
         resources: Option<NemoResources>,
     ) -> Result<NemoEngine, NemoError> {
-        NemoProgram::new(input)?.create_engine(resources).await
+        let resource_providers = BlobResourceProvider::from_js(resources.as_deref())
+            .await?
+            .into_providers();
+
+        let program = NemoProgram::new(input)?;
+
+        Self::from_plan(program.plan, resource_providers).await
     }
 
     async fn from_plan(
